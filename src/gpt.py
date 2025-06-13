@@ -1,6 +1,8 @@
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import torch
 
+from process_logits import TypeStateConstrainedLogitsProcessor
+
 class LLM:
 
     def __init__(self, tokenizer, model):
@@ -41,7 +43,21 @@ class BaselineGPT2(LLM):
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         return generated_text
 
-prompt = "file.open(); file.read(); file."
-baselineLLM = BaselineGPT2()
-output = baselineLLM.generate(prompt)
-print(output)
+class TypestateConstrainedGPT2(LLM):
+
+    def init(self, typestate, max_new_tokens=100, do_sample=True, top_k=50, top_p=0.95):
+        self.max_new_tokens = max_new_tokens
+        self.do_sample = do_sample
+        self.top_k = top_k
+        self.top_p = top_p
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        model = GPT2LMHeadModel.from_pretrained("gpt2")
+        self.logits_processor = TypeStateConstrainedLogitsProcessor(typestate)
+        super().__init__(tokenizer, model)
+        self.eval()
+
+    def generate(self, prompt):
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        outputs = self.logits_processor.process(inputs)
+        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return generated_text
