@@ -1,40 +1,57 @@
 from typing import Dict, Optional
 
-def parse_cli_command(command: str):
-    tokens = command.strip().split()
-    if len(tokens) < 2:
-        raise ValueError("Command must have at least service and api-name")
-    service = tokens[0]
-    api_name = tokens[1]
-    params: Dict[str, str] = {}
-    outfile: Optional[str] = None
+class IncrementalCLIParser:
+    def __init__(self):
+        self.reset()
 
-    i = 2
-    while i < len(tokens):
-        if tokens[i].startswith("--"):
-            param_name = tokens[i][2:]
-            if i + 1 < len(tokens) and not tokens[i+1].startswith("--"):
-                param_value = tokens[i+1]
-                i += 2
-            else:
-                param_value = ""  # or None, if you want to allow flags with no value
-                i += 1
-            params[param_name] = param_value
+    def reset(self):
+        self.tokens = []
+        self.current_token = ""
+        self.state = "service"  # or "api", "param", "value", "outfile", etc.
+        self.service = None
+        self.api_name = None
+        self.params: Dict[str, str] = {}
+        self.current_param = None
+        self.outfile = None
+
+    def parse_char(self, char: str):
+        if char.isspace():
+            if self.current_token:
+                self._process_token(self.current_token)
+                self.current_token = ""
         else:
-            # If it's the last token, treat as outfile
-            if i == len(tokens) - 1:
-                outfile = tokens[i]
-                i += 1
-            else:
-                # Unexpected positional, but just skip or collect as needed
-                i += 1
+            self.current_token += char
 
-    return {
-        "service": service,
-        "api_name": api_name,
-        "params": params,
-        "outfile": outfile
-    }
+    def _process_token(self, token: str):
+        if self.state == "service":
+            self.service = token
+            self.state = "api"
+        elif self.state == "api":
+            self.api_name = token
+            self.state = "param_or_outfile"
+        elif self.state == "param_or_outfile":
+            if token.startswith("--"):
+                self.current_param = token[2:]
+                self.state = "param_value"
+            else:
+                # If this is the last token, treat as outfile
+                self.outfile = token
+        elif self.state == "param_value":
+            self.params[self.current_param] = token
+            self.current_param = None
+            self.state = "param_or_outfile"
+
+    def finalize(self):
+        # If there's a token left, process it
+        if self.current_token:
+            self._process_token(self.current_token)
+            self.current_token = ""
+        return {
+            "service": self.service,
+            "api_name": self.api_name,
+            "params": self.params,
+            "outfile": self.outfile
+        }
 
 # Example usage:
 examples = [
@@ -46,4 +63,7 @@ examples = [
 ]
 
 for cmd in examples:
-    print(parse_cli_command(cmd))
+    parser = IncrementalCLIParser()
+    for c in cmd:
+        parser.parse_char(c)
+    print(parser.finalize())
