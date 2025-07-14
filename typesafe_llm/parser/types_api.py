@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import field
-from typing import List, Dict, Self, Set, FrozenSet, Tuple, Literal, Optional
+from typing import List, Dict, Self, Set, FrozenSet, Tuple, Literal, Optional, Any, Mapping
 
 from functools import lru_cache
 
@@ -13,19 +13,6 @@ class BaseAPIObject(PType):
     """
     Base class for all API values
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        """
-        Get all attributes of the object
-        """
-        return {}
-
-    @property
-    def attributes(self) -> Dict[str, Tuple[Self, bool]]:
-        return {
-            k: (v, isinstance(v, FunctionPType)) for k, v in self._attributes.items()
-        }
 
     @property
     def root_values(self) -> Set[Self]:
@@ -78,13 +65,6 @@ class StringPType(PrimitivePType):
     """
     String type
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
         return "string"
 
@@ -94,13 +74,6 @@ class FloatPType(PrimitivePType):
     """
     Float type
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
         return "float"
 
@@ -110,13 +83,6 @@ class IntegerPType(PrimitivePType):
     """
     Integer type
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
         return "integer"
 
@@ -126,13 +92,6 @@ class BooleanPType(PrimitivePType):
     """
     Boolean type
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
         return "boolean"
 
@@ -142,46 +101,78 @@ class TimestampPType(PrimitivePType):
     """
     Timestamp type
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
         return "timestamp"
 
 
 @fnr_dataclass
-class MapPType(BaseAPIObject):
+class NullPType(PrimitivePType):
     """
-    Map type
+    Null type (for explicit null values)
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
-        return "map"
+        return "null"
 
 @fnr_dataclass
-class StructurePType(BaseAPIObject):  # JSON object
+class BlobPType(PrimitivePType):
     """
-    Structure type
+    Binary/blob type (for e.g. S3 Body)
     """
-
-    @property
-    def _attributes(self) -> Dict[str, Self]:
-        res = {}
-        res.update(super()._attributes)
-        return res
-
     def __str__(self):
-        return "structure"
+        return "blob"
+
+@fnr_dataclass
+class EnumPType(PrimitivePType):
+    """
+    Enum type (for fields with a fixed set of string values)
+    """
+    values: List[str]
+    def __str__(self):
+        return f"enum({', '.join(self.values)})"
+
+@fnr_dataclass
+class UnionPType(BaseAPIObject):
+    """
+    Union type (for fields that can be one of several types)
+    """
+    types: List[PType]
+    def __str__(self):
+        return f"({' | '.join(str(t) for t in self.types)})"
+
+@fnr_dataclass
+class ArrayPType(BaseAPIObject):
+    """
+    Array type (for lists of elements)
+    """
+    element_type: PType
+    def __str__(self):
+        return f"{self.element_type}[]"
+
+@fnr_dataclass
+class MapPType(BaseAPIObject):
+    """
+    Map type (parameterized by key and value type)
+    """
+    key_type: PType
+    value_type: PType
+    def __str__(self):
+        return f"map<{self.key_type}, {self.value_type}>"
+
+@fnr_dataclass
+class StructurePType(BaseAPIObject):
+    """
+    Structure type (JSON object with named fields, e.g. AWS API response)
+    fields: Dict[str, PType] - field name to type
+    required_fields: Set[str] - required field names
+    field_metadata: Optional[Dict[str, Dict[str, Any]]] - optional metadata per field (e.g. description)
+    """
+    fields: Dict[str, PType]
+    required_fields: Set[str] = field(default_factory=set)
+    field_metadata: Optional[Dict[str, Dict[str, Any]]] = None
+    def __str__(self):
+        req = ', '.join(f for f in self.fields if f in self.required_fields)
+        opt = ', '.join(f for f in self.fields if f not in self.required_fields)
+        return f"structure(required=[{req}], optional=[{opt}])"
 
 def any_reachable(
     typs: Set[PType],
