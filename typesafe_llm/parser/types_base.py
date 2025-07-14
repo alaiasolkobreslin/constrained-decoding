@@ -10,7 +10,7 @@ from typing import (
     Literal,
 )
 
-from .util import fnr_dataclass
+from util import fnr_dataclass
 
 OperatorPrecedence = Tuple[int, Literal["left", "right"]]
 

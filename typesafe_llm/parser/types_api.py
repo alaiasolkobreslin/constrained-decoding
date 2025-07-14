@@ -4,8 +4,8 @@ from typing import List, Dict, Self, Set, FrozenSet, Tuple, Literal, Optional, A
 
 from functools import lru_cache
 
-from .types_base import PType, AnyPType, OperatorPrecedence
-from .util import fnr_dataclass, union_dict
+from types_base import PType, AnyPType, OperatorPrecedence
+from util import fnr_dataclass, union_dict
 
 
 @fnr_dataclass
