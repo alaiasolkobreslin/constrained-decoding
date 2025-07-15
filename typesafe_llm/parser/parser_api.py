@@ -1,5 +1,21 @@
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from parser_base import IncrementalParsingState
+import dataclasses
+
+# Minimal DFA/Automaton for typestate tracking
+class Automaton:
+    def __init__(self, states: List[str], symbols: List[str], transitions: Dict[str, Dict[str, str]], initial_state: str, final_states: List[str]):
+        self.states = states
+        self.symbols = symbols
+        self.transitions = transitions
+        self.initial_state = initial_state
+        self.final_states = final_states
+
+    def transition(self, current_state: str, symbol: str) -> Optional[str]:
+        return self.transitions.get(current_state, {}).get(symbol, None)
+
+    def is_final(self, state: str) -> bool:
+        return state in self.final_states
 
 class CLIParsingState(IncrementalParsingState):
     def __init__(
@@ -12,8 +28,13 @@ class CLIParsingState(IncrementalParsingState):
         current_param: Optional[str] = None,
         outfile: Optional[str] = None,
         accept: bool = False,
+        # Typestate tracking
+        typestate: Optional[str] = None,
+        automaton: Optional[Automaton] = None,
+        parsed_calls: Optional[List[Dict[str, Any]]] = None,
     ):
-        super().__init__(accept=accept)
+        super().__init__()
+        # self.accept = accept
         self.current_token = current_token
         self.state = state
         self.service = service
@@ -21,8 +42,35 @@ class CLIParsingState(IncrementalParsingState):
         self.params = params or {}
         self.current_param = current_param
         self.outfile = outfile
+        self.typestate = typestate
+        self.automaton = automaton
+        self.parsed_calls = parsed_calls or []
 
     def parse_char(self, char: str) -> List["CLIParsingState"]:
+        # Handle semicolon as API call separator
+        if char == ";":
+            # If there's an unprocessed token, process it first
+            state = self
+            if self.current_token:
+                state = self._process_token(self.current_token)
+            finalized = state._finalize_call()
+            if finalized is None:
+                # Ignore empty/invalid call before semicolon
+                return [state._reset_for_next_call()]
+            call, next_typestate = finalized
+            new_calls = state.parsed_calls + [call]
+            return [CLIParsingState(
+                current_token="",
+                state="service",
+                service=None,
+                api_name=None,
+                params={},
+                current_param=None,
+                outfile=None,
+                typestate=next_typestate,
+                automaton=self.automaton,
+                parsed_calls=new_calls
+            )]
         # Tokenize on whitespace
         if char.isspace():
             if self.current_token:
@@ -39,7 +87,9 @@ class CLIParsingState(IncrementalParsingState):
                 params=self.params.copy(),
                 current_param=self.current_param,
                 outfile=self.outfile,
-                accept=False
+                typestate=self.typestate,
+                automaton=self.automaton,
+                parsed_calls=self.parsed_calls.copy()
             )]
 
     def _process_token(self, token: str) -> "CLIParsingState":
@@ -49,7 +99,10 @@ class CLIParsingState(IncrementalParsingState):
         params = self.params.copy()
         current_param = self.current_param
         outfile = self.outfile
-        accept = False
+        # accept = False
+        typestate = self.typestate
+        automaton = self.automaton
+        parsed_calls = self.parsed_calls.copy()
 
         if state == "service":
             service = token
@@ -63,7 +116,7 @@ class CLIParsingState(IncrementalParsingState):
                 state = "param_value"
             else:
                 outfile = token
-                accept = True
+                # accept = True
         elif state == "param_value":
             if current_param is not None:
                 params[current_param] = token
@@ -78,34 +131,87 @@ class CLIParsingState(IncrementalParsingState):
             params=params,
             current_param=current_param,
             outfile=outfile,
-            accept=accept
+            # accept=accept,
+            typestate=typestate,
+            automaton=automaton,
+            parsed_calls=parsed_calls
+        )
+
+    def _finalize_call(self):
+        # Only finalize if we have a service and api_name
+        if not self.service or not self.api_name:
+            return None
+        call = {
+            "service": self.service,
+            "api_name": self.api_name,
+            "params": self.params,
+            "outfile": self.outfile
+        }
+        # Compute next typestate if automaton is present
+        next_typestate = self.typestate
+        if self.automaton:
+            symbol = self.api_name
+            current_state = self.typestate if self.typestate is not None else self.automaton.initial_state
+            next_typestate = self.automaton.transition(current_state, symbol) or current_state
+        return call, next_typestate
+
+    def _reset_for_next_call(self):
+        return CLIParsingState(
+            current_token="",
+            state="service",
+            service=None,
+            api_name=None,
+            params={},
+            current_param=None,
+            outfile=None,
+            accept=False,
+            typestate=self.typestate,
+            automaton=self.automaton,
+            parsed_calls=self.parsed_calls.copy()
         )
 
     def num_active_states(self):
         return 1
 
     def finalize(self):
+        # Finalize the last call if needed
         state = self
         if self.current_token:
             state = self._process_token(self.current_token)
+        finalized = state._finalize_call()
+        calls = self.parsed_calls.copy()
+        typestate = self.typestate
+        if finalized is not None:
+            call, typestate = finalized
+            calls.append(call)
         return {
-            "service": state.service,
-            "api_name": state.api_name,
-            "params": state.params,
-            "outfile": state.outfile
+            "calls": calls,
+            "final_typestate": typestate
         }
+
+# Example automaton for file operations
+automaton = Automaton(
+    states=["start", "opened", "closed"],
+    symbols=["open-file", "read-file", "write-file", "close-file"],
+    transitions={
+        "start": {"open-file": "opened"},
+        "opened": {"read-file": "opened", "write-file": "opened", "close-file": "closed"},
+        "closed": {}
+    },
+    initial_state="start",
+    final_states=["closed"]
+)
 
 # Example usage:
 examples = [
-    "s3api get-object --bucket my-bucket --key my-key outfile.txt",
-    "dynamodb put-item --table-name my-table --item '{\"id\": {\"S\": \"123\"}}'",
-    "ec2 run-instances --image-id ami-123456 --instance-type t2.micro --min-count 1 --max-count 2",
-    "s3api create-bucket --bucket my-bucket",
-    "fake-api open-file --file-name my-file.txt"
+    "fake-api open-file --file-name my-file.txt; fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+    "fake-api open-file --file-name my-file.txt; fake-api write-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+    "fake-api open-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+    "fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt"  # Invalid: read before open
 ]
 
 for cmd in examples:
-    state = CLIParsingState()
+    state = CLIParsingState(typestate=automaton.initial_state, automaton=automaton)
     for c in cmd:
         state = state.parse_char(c)[0]
     print(state.finalize())
