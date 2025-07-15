@@ -9,9 +9,9 @@ import frozenlist
 import regex
 from dataclasses import replace, field
 
-from .types_base import PType, AnyPType, OperatorPrecedence
-from .types_ts import MAX_OPERATOR_PRECEDENCE, MIN_OPERATOR_PRECEDENCE
-from .util import (
+from types_base import PType, AnyPType, OperatorPrecedence
+from types_ts import MAX_OPERATOR_PRECEDENCE, MIN_OPERATOR_PRECEDENCE
+from util import (
     sum_list,
     fnr_dataclass,
     union_dict,
