@@ -54,7 +54,7 @@ class APINamesTrieLogitsProcessor(LogitsProcessor):
             if valid:
                 allowed[token_id] = True
         allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
-        print(f"[API Name] Allowed tokens: {allowed_tokens}")
+        print(f"[API Name] Allowed tokens: {allowed_tokens[:10]}")
         mask = torch.full_like(scores, float('-inf'))
         mask[0, allowed] = 0
         return scores + mask
@@ -92,11 +92,7 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
             # Only allow 'fake-service' (or whatever service names you want)
             for token_id in range(scores.shape[-1]):
                 token = self.tokenizer.decode([token_id])
-                # print(f"token.strip(): {token.strip()}")
-                if token.strip() == "fake":
-                    print('~~~~~~GOT TO FAKE~~~~~~ SHOULD BE ALLOWED')
                 if token.strip() == "fake-service":
-                    # print(f"allowed token HERE: {token_id}")
                     allowed[token_id] = True
         elif self.parser_state.state == "api":
             # This state is handled by the Trie-based processor
@@ -107,7 +103,7 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
             # TODO: should the default be to allow all tokens?
             allowed[:] = True
         allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
-        print(f"[CLI Structure] Allowed tokens: {allowed_tokens}")
+        print(f"[CLI Structure] Allowed tokens: {allowed_tokens[:10]}")
         mask = torch.full_like(scores, float('-inf'))
         mask[0, allowed] = 0
         return scores + mask
@@ -125,6 +121,7 @@ for char in prompt:
 max_steps = 40
 api_name_prefix = []
 constraining_api_name = False
+expecting_api_name_separator = False  # Flag: after API name, only allow whitespace or semicolon
 for step in range(max_steps):
     outputs = model(input_ids)
     logits = outputs.logits[:, -1, :]
@@ -132,7 +129,26 @@ for step in range(max_steps):
     print(f"\nStep {step}: parser_state.state = {state.state}, decoded_so_far = '{decoded_so_far[-50:]}'")
 
     # Decide which masking to apply
-    if state.state == "api" or constraining_api_name:
+    if expecting_api_name_separator:
+        # Only allow whitespace, semicolon, or tokens that start with a space after API name
+        # This ensures correct CLI structure: API name must be followed by a separator
+        allowed = torch.zeros(logits.shape[-1], dtype=torch.bool)
+        for token_id in range(logits.shape[-1]):
+            token = tokenizer.decode([token_id])
+            # Allow: (a) whitespace, (b) semicolon, (c) tokens that start with a space (e.g., ' write-file')
+            if token.isspace() or token == ";" or token.startswith(" "):
+                allowed[token_id] = True
+        allowed_tokens = [tokenizer.decode([i]) for i in range(logits.shape[-1]) if allowed[i]]
+        print(f"[API Name Separator] Allowed tokens: {allowed_tokens[:10]}")
+        mask = torch.full_like(logits, float('-inf'))
+        mask[0, allowed] = 0
+        filtered_logits = logits + mask
+        next_token_id = torch.argmax(filtered_logits, dim=-1)
+        next_token_str = tokenizer.decode(next_token_id)
+        # After consuming a valid separator, reset the flag
+        if next_token_str.isspace() or next_token_str == ";" or next_token_str.startswith(" "):
+            expecting_api_name_separator = False
+    elif state.state == "api" or constraining_api_name:
         print("GOT TO API NAME MASKING")
         # Trie-based API name masking
         constraining_api_name = True
@@ -146,15 +162,17 @@ for step in range(max_steps):
                 print(f"Completed API name: {tokenizer.decode(api_name_prefix)}")
                 constraining_api_name = False
                 api_name_prefix = []
+                expecting_api_name_separator = True  # <-- Set flag to require whitespace or semicolon next
                 break
+        next_token_str = tokenizer.decode(next_token_id)
     else:
         print("DIDN'T GET TO API NAME MASKING :(")
         # CLI structure masking (semicolon/parameter enforcement)
         processor = CLIStructureLogitsProcessor(state, tokenizer)
         filtered_logits = processor(input_ids, logits)
         next_token_id = torch.argmax(filtered_logits, dim=-1)
+        next_token_str = tokenizer.decode(next_token_id)
 
-    next_token_str = tokenizer.decode(next_token_id)
     print(f"Step {step}: '{next_token_str}'")
     input_ids = torch.cat([input_ids, next_token_id.unsqueeze(0)], dim=1)
     state = state.parse_char(next_token_str)[0]
@@ -163,6 +181,7 @@ for step in range(max_steps):
     # When parser expects a new command (state == 'service'), only allow 'fake-service' (or valid service names).
     # When parser expects a new API name (state == 'api'), only allow valid API names (Trie masking).
     # When parser expects a parameter or outfile (state == 'param_or_outfile'), only allow '--' or ';'.
+    # After an API name, only allow whitespace or semicolon (see above logic).
     # This ensures that after a command, a semicolon is required to start the next command.
 
     if state.typestate == automaton.final_states[0]:

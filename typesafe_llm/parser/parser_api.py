@@ -48,6 +48,7 @@ class CLIParsingState(IncrementalParsingState):
 
     def parse_char(self, char: str) -> List["CLIParsingState"]:
         # Handle semicolon as API call separator
+        print(f"\n~~~~~~processing char: {char}~~~~~~\n")
         if char == ";":
             # If there's an unprocessed token, process it first
             state = self
@@ -103,6 +104,8 @@ class CLIParsingState(IncrementalParsingState):
         typestate = self.typestate
         automaton = self.automaton
         parsed_calls = self.parsed_calls.copy()
+
+        print(f"\n~~~~~~processing token: {token}~~~~~~\n")
 
         if state == "service":
             service = token
@@ -204,10 +207,10 @@ class CLIParsingState(IncrementalParsingState):
 
 # # Example usage:
 # examples = [
-#     "fake-api open-file --file-name my-file.txt; fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-#     "fake-api open-file --file-name my-file.txt; fake-api write-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-#     "fake-api open-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-#     "fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt"  # Invalid: read before open
+#     "fake-service open-file --file-name my-file.txt; fake-service read-file --file-name my-file.txt; fake-service close-file --file-name my-file.txt",
+#     "fake-service open-file --file-name my-file.txt; fake-service write-file --file-name my-file.txt; fake-service close-file --file-name my-file.txt",
+#     "fake-service open-file --file-name my-file.txt; fake-service close-file --file-name my-file.txt",
+#     "fake-service read-file --file-name my-file.txt; fake-service close-file --file-name my-file.txt"  # Invalid: read before open
 # ]
 
 # for cmd in examples:
