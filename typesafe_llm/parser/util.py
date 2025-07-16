@@ -28,3 +28,11 @@ def intersection_dict(d1, d2, *args):
 def update_keys(d1, d2):
     """Update the entries of d1 with the value of d2 iff d2 contains that value"""
     return {k: d2.get(k, v) for k, v in d1.items()}
+
+
+def pflush(string: str):
+    print(string, flush=True, end="")
+
+
+def delete(string: str, _pflush=pflush):
+    _pflush(len(string) * "\b" + len(string) * " " + len(string) * "\b")

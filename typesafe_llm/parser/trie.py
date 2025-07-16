@@ -28,7 +28,7 @@ SOFTWARE.
 import collections
 from typing import Iterable
 
-from typesafe_llm.util import pflush
+from util import pflush
 
 
 # Trie representation of a vocabulary.
