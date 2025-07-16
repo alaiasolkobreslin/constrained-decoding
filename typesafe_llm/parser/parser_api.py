@@ -189,29 +189,29 @@ class CLIParsingState(IncrementalParsingState):
             "final_typestate": typestate
         }
 
-# Example automaton for file operations
-automaton = Automaton(
-    states=["start", "opened", "closed"],
-    symbols=["open-file", "read-file", "write-file", "close-file"],
-    transitions={
-        "start": {"open-file": "opened"},
-        "opened": {"read-file": "opened", "write-file": "opened", "close-file": "closed"},
-        "closed": {}
-    },
-    initial_state="start",
-    final_states=["closed"]
-)
+# # Example automaton for file operations
+# automaton = Automaton(
+#     states=["start", "opened", "closed"],
+#     symbols=["open-file", "read-file", "write-file", "close-file"],
+#     transitions={
+#         "start": {"open-file": "opened"},
+#         "opened": {"read-file": "opened", "write-file": "opened", "close-file": "closed"},
+#         "closed": {}
+#     },
+#     initial_state="start",
+#     final_states=["closed"]
+# )
 
-# Example usage:
-examples = [
-    "fake-api open-file --file-name my-file.txt; fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-    "fake-api open-file --file-name my-file.txt; fake-api write-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-    "fake-api open-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
-    "fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt"  # Invalid: read before open
-]
+# # Example usage:
+# examples = [
+#     "fake-api open-file --file-name my-file.txt; fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+#     "fake-api open-file --file-name my-file.txt; fake-api write-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+#     "fake-api open-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt",
+#     "fake-api read-file --file-name my-file.txt; fake-api close-file --file-name my-file.txt"  # Invalid: read before open
+# ]
 
-for cmd in examples:
-    state = CLIParsingState(typestate=automaton.initial_state, automaton=automaton)
-    for c in cmd:
-        state = state.parse_char(c)[0]
-    print(state.finalize())
+# for cmd in examples:
+#     state = CLIParsingState(typestate=automaton.initial_state, automaton=automaton)
+#     for c in cmd:
+#         state = state.parse_char(c)[0]
+#     print(state.finalize())
