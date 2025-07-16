@@ -53,7 +53,6 @@ class APINamesTrieLogitsProcessor(LogitsProcessor):
                     break
             if valid:
                 allowed[token_id] = True
-        print (f"allowed: {allowed}")
         allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
         print(f"[API Name] Allowed tokens: {allowed_tokens}")
         mask = torch.full_like(scores, float('-inf'))
@@ -76,6 +75,7 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
         self.tokenizer = tokenizer
 
     def __call__(self, input_ids, scores):
+        print(f"the corresponding tokens: {[tokenizer.decode(input_id) for input_id in input_ids]}")
         allowed = torch.zeros(scores.shape[-1], dtype=torch.bool)
         # Determine what is valid next, based on parser_state.state
         if self.parser_state.state == "param_or_outfile":
@@ -89,11 +89,13 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
             allowed[:] = True
         elif self.parser_state.state == "service":
             print("got to __call__ for CLIStructureLogitsProcessor, state == service")
-            # Only allow 'fake-api' (or whatever service names you want)
+            # Only allow 'fake-service' (or whatever service names you want)
             for token_id in range(scores.shape[-1]):
                 token = self.tokenizer.decode([token_id])
                 # print(f"token.strip(): {token.strip()}")
-                if token.strip() == "fake-api":
+                if token.strip() == "fake":
+                    print('~~~~~~GOT TO FAKE~~~~~~ SHOULD BE ALLOWED')
+                if token.strip() == "fake-service":
                     # print(f"allowed token HERE: {token_id}")
                     allowed[token_id] = True
         elif self.parser_state.state == "api":
@@ -111,9 +113,13 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
         return scores + mask
 
 # 6. Initial prompt and parser state
-prompt = "fake-api open-file --file-name my-file.txt; fake-api "
+prompt = "fake-service open-file --file-name my-file.txt; fake-service "
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids
 state = CLIParsingState(typestate=automaton.initial_state, automaton=automaton)
+
+# First, get the state to parse the prompt
+for char in prompt:
+    state = state.parse_char(char)[0]
 
 # 7. Generation loop: apply appropriate masking at each step
 max_steps = 40
@@ -146,9 +152,6 @@ for step in range(max_steps):
         # CLI structure masking (semicolon/parameter enforcement)
         processor = CLIStructureLogitsProcessor(state, tokenizer)
         filtered_logits = processor(input_ids, logits)
-        print(f"filtered_logits: {filtered_logits}")
-        print(f"filtered_logits.shape: {filtered_logits.shape}")
-        print(f"torch.max(filtered_logits): {torch.max(filtered_logits)}")
         next_token_id = torch.argmax(filtered_logits, dim=-1)
 
     next_token_str = tokenizer.decode(next_token_id)
@@ -157,7 +160,7 @@ for step in range(max_steps):
     state = state.parse_char(next_token_str)[0]
 
     # Encourage/require semicolon at the end of a command:
-    # When parser expects a new command (state == 'service'), only allow 'fake-api' (or valid service names).
+    # When parser expects a new command (state == 'service'), only allow 'fake-service' (or valid service names).
     # When parser expects a new API name (state == 'api'), only allow valid API names (Trie masking).
     # When parser expects a parameter or outfile (state == 'param_or_outfile'), only allow '--' or ';'.
     # This ensures that after a command, a semicolon is required to start the next command.
