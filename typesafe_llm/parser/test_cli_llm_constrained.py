@@ -65,10 +65,11 @@ class ParameterNameLogitsProcessor(LogitsProcessor):
     Uses a Trie for allowed parameter names, similar to APINamesTrieLogitsProcessor.
     To extend, add more parameter names to the list.
     """
-    def __init__(self, tokenizer, allowed_param_names=None, current_prefix_ids=None):
+    def __init__(self, tokenizer, has_seen_dashdash=False, allowed_param_names=None, current_prefix_ids=None):
         self.tokenizer = tokenizer
+        self.has_seen_dashdash = has_seen_dashdash
         if allowed_param_names is None:
-            allowed_param_names = ["--file-name"]
+            allowed_param_names = ["file-name"]
         self.allowed_param_names = allowed_param_names
         self.param_name_token_ids = [tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
         self.trie = Trie()
@@ -78,18 +79,23 @@ class ParameterNameLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         allowed = torch.zeros(scores.shape[-1], dtype=torch.bool)
-        for token_id in range(scores.shape[-1]):
-            next_prefix = self.current_prefix_ids + [token_id]
-            node = self.trie
-            valid = True
-            for tid in next_prefix:
-                if tid in node._children:
-                    node = node._children[tid]
-                else:
-                    valid = False
-                    break
-            if valid:
-                allowed[token_id] = True
+
+        if self.has_seen_dashdash:
+            for token_id in range(scores.shape[-1]):
+                next_prefix = self.current_prefix_ids + [token_id]
+                node = self.trie
+                valid = True
+                for tid in next_prefix:
+                    if tid in node._children:
+                        node = node._children[tid]
+                    else:
+                        valid = False
+                        break
+                if valid:
+                    allowed[token_id] = True
+        else:
+            # Only allowed token is the "--"
+            allowed[tokenizer.encode("--", add_special_tokens=False)[0]] = True
         allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
         print(f"[Parameter Name] Allowed tokens: {allowed_tokens[:10]}")
         mask = torch.full_like(scores, float('-inf'))
@@ -159,7 +165,7 @@ for char in prompt:
     state = state.parse_char(char)[0]
 
 # 7. Generation loop: apply appropriate masking at each step
-max_steps = 40
+max_steps = 10
 api_name_prefix = []
 constraining_api_name = False
 expecting_api_name_separator = False  # Flag: after API name, only allow whitespace or semicolon
@@ -213,8 +219,12 @@ for step in range(max_steps):
                 break
         next_token_str = tokenizer.decode(next_token_id)
     elif state.state == "param_or_outfile":
-        print("GOT TO PARAMETER NAME MASKING")
-        processor = ParameterNameLogitsProcessor(tokenizer)
+        processor = ParameterNameLogitsProcessor(tokenizer, has_seen_dashdash=False)
+        filtered_logits = processor(input_ids, logits)
+        next_token_id = torch.argmax(filtered_logits, dim=-1)
+        next_token_str = tokenizer.decode(next_token_id)
+    elif state.state == "param_name":
+        processor = ParameterNameLogitsProcessor(tokenizer, has_seen_dashdash=True)
         filtered_logits = processor(input_ids, logits)
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         next_token_str = tokenizer.decode(next_token_id)
