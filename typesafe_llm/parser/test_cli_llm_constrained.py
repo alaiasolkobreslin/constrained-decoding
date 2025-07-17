@@ -78,12 +78,16 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
         print(f"the corresponding tokens: {[tokenizer.decode(input_id) for input_id in input_ids]}")
         allowed = torch.zeros(scores.shape[-1], dtype=torch.bool)
         # Determine what is valid next, based on parser_state.state
+        print(f"entering __call__ with parser_state.state == {self.parser_state.state}")
         if self.parser_state.state == "param_or_outfile":
             # Only allow '--' or ';' (or optionally a filename token)
             for token_id in range(scores.shape[-1]):
                 token = self.tokenizer.decode([token_id])
                 if token == "--" or token == ";":
                     allowed[token_id] = True
+        elif self.parser_state.state == "param_name":
+            # TODO: fix this to lookup allowed parameter names from some dictionary
+            allowed[:] = True
         elif self.parser_state.state == "param_value":
             # Allow any token (or restrict to alphanumeric)
             allowed[:] = True
@@ -96,7 +100,7 @@ class CLIStructureLogitsProcessor(LogitsProcessor):
                     allowed[token_id] = True
         elif self.parser_state.state == "api":
             # This state is handled by the Trie-based processor
-            # TODO: should we really allow all tokens here?
+            # TODO: fix this to allow only valid API names
             allowed[:] = True
         else:
             # Default: allow all
@@ -130,13 +134,14 @@ for step in range(max_steps):
 
     # Decide which masking to apply
     if expecting_api_name_separator:
+        print("\n~~~~~~GOT TO API NAME SEPARATOR MASKING~~~~~~\n")
         # Only allow whitespace, semicolon, or tokens that start with a space after API name
         # This ensures correct CLI structure: API name must be followed by a separator
         allowed = torch.zeros(logits.shape[-1], dtype=torch.bool)
         for token_id in range(logits.shape[-1]):
             token = tokenizer.decode([token_id])
-            # Allow: (a) whitespace, (b) semicolon, (c) tokens that start with a space (e.g., ' write-file')
-            if token.isspace() or token == ";" or token.startswith(" "):
+            # Temporarily allow only whitespace
+            if token == " ":
                 allowed[token_id] = True
         allowed_tokens = [tokenizer.decode([i]) for i in range(logits.shape[-1]) if allowed[i]]
         print(f"[API Name Separator] Allowed tokens: {allowed_tokens[:10]}")
@@ -145,9 +150,10 @@ for step in range(max_steps):
         filtered_logits = logits + mask
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         next_token_str = tokenizer.decode(next_token_id)
-        # After consuming a valid separator, reset the flag
-        if next_token_str.isspace() or next_token_str == ";" or next_token_str.startswith(" "):
+        if next_token_str == " " or next_token_str == ";" or next_token_str == "--": #or next_token_str.startswith(" "):
             expecting_api_name_separator = False
+        else:
+            raise ValueError(f"Expected whitespace or semicolon, got {next_token_str}")
     elif state.state == "api" or constraining_api_name:
         print("GOT TO API NAME MASKING")
         # Trie-based API name masking
@@ -166,7 +172,6 @@ for step in range(max_steps):
                 break
         next_token_str = tokenizer.decode(next_token_id)
     else:
-        print("DIDN'T GET TO API NAME MASKING :(")
         # CLI structure masking (semicolon/parameter enforcement)
         processor = CLIStructureLogitsProcessor(state, tokenizer)
         filtered_logits = processor(input_ids, logits)
