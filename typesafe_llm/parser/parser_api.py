@@ -82,7 +82,6 @@ class CLIParsingState(IncrementalParsingState):
             else:
                 return [self]
         elif char == "--":
-            print(f"\n~~~~~~GOT TO -- and changing state to param_name~~~~~~\n")
             return [self._process_token(char)]
         else:
             # Continue building the current token

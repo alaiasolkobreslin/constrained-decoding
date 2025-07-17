@@ -59,6 +59,43 @@ class APINamesTrieLogitsProcessor(LogitsProcessor):
         mask[0, allowed] = 0
         return scores + mask
 
+class ParameterNameLogitsProcessor(LogitsProcessor):
+    """
+    Only allow tokens that could continue a valid parameter name (e.g., '--file-name').
+    Uses a Trie for allowed parameter names, similar to APINamesTrieLogitsProcessor.
+    To extend, add more parameter names to the list.
+    """
+    def __init__(self, tokenizer, allowed_param_names=None, current_prefix_ids=None):
+        self.tokenizer = tokenizer
+        if allowed_param_names is None:
+            allowed_param_names = ["--file-name"]
+        self.allowed_param_names = allowed_param_names
+        self.param_name_token_ids = [tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
+        self.trie = Trie()
+        for name, ids in zip(allowed_param_names, self.param_name_token_ids):
+            self.trie.insert(ids, name)
+        self.current_prefix_ids = current_prefix_ids or []
+
+    def __call__(self, input_ids, scores):
+        allowed = torch.zeros(scores.shape[-1], dtype=torch.bool)
+        for token_id in range(scores.shape[-1]):
+            next_prefix = self.current_prefix_ids + [token_id]
+            node = self.trie
+            valid = True
+            for tid in next_prefix:
+                if tid in node._children:
+                    node = node._children[tid]
+                else:
+                    valid = False
+                    break
+            if valid:
+                allowed[token_id] = True
+        allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
+        print(f"[Parameter Name] Allowed tokens: {allowed_tokens[:10]}")
+        mask = torch.full_like(scores, float('-inf'))
+        mask[0, allowed] = 0
+        return scores + mask
+
 # 5. Custom LogitsProcessor for CLI structure (semicolon/parameter enforcement)
 class CLIStructureLogitsProcessor(LogitsProcessor):
     """
@@ -156,20 +193,30 @@ for step in range(max_steps):
             raise ValueError(f"Expected whitespace or semicolon, got {next_token_str}")
     elif state.state == "api" or constraining_api_name:
         print("GOT TO API NAME MASKING")
-        # Trie-based API name masking
-        constraining_api_name = True
-        processor = APINamesTrieLogitsProcessor(api_name_trie, api_name_prefix, tokenizer)
+        # Dynamically get valid API names for the current typestate
+        valid_api_names = list(automaton.transitions[state.typestate].keys())
+        valid_api_name_token_ids = [tokenizer.encode(api, add_special_tokens=False) for api in valid_api_names]
+        valid_api_name_trie = Trie()
+        for api, ids in zip(valid_api_names, valid_api_name_token_ids):
+            valid_api_name_trie.insert(ids, api)
+        processor = APINamesTrieLogitsProcessor(valid_api_name_trie, api_name_prefix, tokenizer)
         filtered_logits = processor(input_ids, logits)
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         api_name_prefix.append(next_token_id.item())
         # Check if we've completed an API name
-        for api_ids in api_name_token_ids:
+        for api_ids in valid_api_name_token_ids:
             if api_name_prefix == api_ids:
                 print(f"Completed API name: {tokenizer.decode(api_name_prefix)}")
                 constraining_api_name = False
                 api_name_prefix = []
                 expecting_api_name_separator = True  # <-- Set flag to require whitespace or semicolon next
                 break
+        next_token_str = tokenizer.decode(next_token_id)
+    elif state.state == "param_or_outfile":
+        print("GOT TO PARAMETER NAME MASKING")
+        processor = ParameterNameLogitsProcessor(tokenizer)
+        filtered_logits = processor(input_ids, logits)
+        next_token_id = torch.argmax(filtered_logits, dim=-1)
         next_token_str = tokenizer.decode(next_token_id)
     else:
         # CLI structure masking (semicolon/parameter enforcement)
