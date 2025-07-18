@@ -1,0 +1,6 @@
+{
+  "open-file": ["--file-name"],
+  "read-file": ["--file-name"],
+  "write-file": ["--file-name"],
+  "close-file": ["--file-name"]
+} 

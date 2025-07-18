@@ -1,0 +1,11 @@
+{
+  "states": ["start", "opened", "closed"],
+  "symbols": ["open-file", "read-file", "write-file", "close-file"],
+  "transitions": {
+    "start": {"open-file": "opened"},
+    "opened": {"read-file": "opened", "write-file": "opened", "close-file": "closed"},
+    "closed": {}
+  },
+  "initial_state": "start",
+  "final_states": ["closed"]
+} 

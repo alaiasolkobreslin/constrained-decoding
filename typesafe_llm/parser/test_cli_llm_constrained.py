@@ -4,26 +4,27 @@ from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsProcessor
 from parser_api import CLIParsingState, Automaton
 from trie import Trie
+import json
+import os
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+automaton_json_path = os.path.join(script_dir, "typestates.json")
+parameter_names_json_path = os.path.join(script_dir, "parameter_names.json")
+
+with open(automaton_json_path, "r") as f:
+    automaton_data = json.load(f)
+
+with open(parameter_names_json_path, "r") as f:
+    parameter_names = json.load(f)
 
 # Setup automaton and parser
 automaton = Automaton(
-    states=["start", "opened", "closed"],
-    symbols=["open-file", "read-file", "write-file", "close-file"],
-    transitions={
-        "start": {"open-file": "opened"},
-        "opened": {"read-file": "opened", "write-file": "opened", "close-file": "closed"},
-        "closed": {}
-    },
-    initial_state="start",
-    final_states=["closed"]
+    states=automaton_data["states"],
+    symbols=automaton_data["symbols"],
+    transitions=automaton_data["transitions"],
+    initial_state=automaton_data["initial_state"],
+    final_states=automaton_data["final_states"]
 )
-
-parameter_names = {
-    "open-file": ["--file-name"],
-    "read-file": ["--file-name"],
-    "write-file": ["--file-name"],
-    "close-file": ["--file-name"]
-}
 
 # Load model and tokenizer
 model_name = "sshleifer/tiny-gpt2"
