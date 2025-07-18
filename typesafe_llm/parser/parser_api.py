@@ -74,15 +74,10 @@ class CLIParsingState(IncrementalParsingState):
             )]
         # Tokenize on whitespace
         if char.isspace():
-            # print(f"\n~~~~~~GOT TO WHITESPACE OR -- and changing state to param_name~~~~~~\n")
-            # #  return [self._process_token(char)]
             if self.current_token:
-                print(f"\n~~~~~~GOING TO PROCESS TOKEN~~~~~~\n")
                 return [self._process_token(self.current_token)]
             else:
                 return [self]
-        elif char == "--":
-            return [self._process_token(char)]
         else:
             # Continue building the current token
             return [CLIParsingState(
@@ -118,23 +113,20 @@ class CLIParsingState(IncrementalParsingState):
         elif state == "api":
             api_name = token
             state = "param_or_outfile"
-        elif state == "param_or_outfile":
-            if token.startswith("--"):
-                print("GOT TO -- and changing state to param_name")
-                state = "param_name"
-            else:
-                print(f"GOT TO DIFFERENT TOKEN: {token}")
-                outfile = token
-                raise ValueError("GOT TO OUTFILE")
-        elif state == "param_name":
-            current_param = token
-            state = "param_value"
         # elif state == "param_or_outfile":
-        #     if token.startswith("--"):
-        #         current_param = token[2:]
-        #         state = "param_value"
+        #     # if token.startswith("--"):
+        #     if token == "--":
+        #         state = "param_name"
         #     else:
         #         outfile = token
+        #         raise ValueError("GOT TO OUTFILE")
+        elif state == "param_or_outfile":
+            if token.startswith("--"):
+                current_param = token
+                state = "param_value"
+            else:
+                outfile = token
+                # TODO: handle outfile
         elif state == "param_value":
             if current_param is not None:
                 params[current_param] = token
