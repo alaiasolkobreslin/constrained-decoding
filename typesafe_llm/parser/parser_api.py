@@ -32,6 +32,8 @@ class CLIParsingState(IncrementalParsingState):
         typestate: Optional[str] = None,
         automaton: Optional[Automaton] = None,
         parsed_calls: Optional[List[Dict[str, Any]]] = None,
+        # Track opened files globally
+        opened_files: Optional[set] = None,
     ):
         super().__init__()
         # self.accept = accept
@@ -45,6 +47,8 @@ class CLIParsingState(IncrementalParsingState):
         self.typestate = typestate
         self.automaton = automaton
         self.parsed_calls = parsed_calls or []
+        # Track opened files globally
+        self.opened_files = set() if not hasattr(self, 'opened_files') else self.opened_files
 
     def parse_char(self, char: str) -> List["CLIParsingState"]:
         # Handle semicolon as API call separator
@@ -58,7 +62,7 @@ class CLIParsingState(IncrementalParsingState):
             if finalized is None:
                 # Ignore empty/invalid call before semicolon
                 return [state._reset_for_next_call()]
-            call, next_typestate = finalized
+            call, next_typestate, new_opened_files = finalized
             new_calls = state.parsed_calls + [call]
             return [CLIParsingState(
                 current_token="",
@@ -70,7 +74,9 @@ class CLIParsingState(IncrementalParsingState):
                 outfile=None,
                 typestate=next_typestate,
                 automaton=self.automaton,
-                parsed_calls=new_calls
+                parsed_calls=new_calls,
+                # Carry forward opened_files
+                opened_files=new_opened_files
             )]
         # Tokenize on whitespace
         if char.isspace():
@@ -90,7 +96,8 @@ class CLIParsingState(IncrementalParsingState):
                 outfile=self.outfile,
                 typestate=self.typestate,
                 automaton=self.automaton,
-                parsed_calls=self.parsed_calls.copy()
+                parsed_calls=self.parsed_calls.copy(),
+                opened_files=self.opened_files.copy()
             )]
 
     def _process_token(self, token: str) -> "CLIParsingState":
@@ -100,10 +107,10 @@ class CLIParsingState(IncrementalParsingState):
         params = self.params.copy()
         current_param = self.current_param
         outfile = self.outfile
-        # accept = False
         typestate = self.typestate
         automaton = self.automaton
         parsed_calls = self.parsed_calls.copy()
+        opened_files = self.opened_files.copy()
 
         print(f"\n~~~~~~processing token: {token}~~~~~~\n")
 
@@ -113,20 +120,12 @@ class CLIParsingState(IncrementalParsingState):
         elif state == "api":
             api_name = token
             state = "param_or_outfile"
-        # elif state == "param_or_outfile":
-        #     # if token.startswith("--"):
-        #     if token == "--":
-        #         state = "param_name"
-        #     else:
-        #         outfile = token
-        #         raise ValueError("GOT TO OUTFILE")
         elif state == "param_or_outfile":
             if token.startswith("--"):
                 current_param = token
                 state = "param_value"
             else:
                 outfile = token
-                # TODO: handle outfile
         elif state == "param_value":
             if current_param is not None:
                 params[current_param] = token
@@ -141,10 +140,10 @@ class CLIParsingState(IncrementalParsingState):
             params=params,
             current_param=current_param,
             outfile=outfile,
-            # accept=accept,
             typestate=typestate,
             automaton=automaton,
-            parsed_calls=parsed_calls
+            parsed_calls=parsed_calls,
+            opened_files=opened_files
         )
 
     def _finalize_call(self):
@@ -163,7 +162,13 @@ class CLIParsingState(IncrementalParsingState):
             symbol = self.api_name
             current_state = self.typestate if self.typestate is not None else self.automaton.initial_state
             next_typestate = self.automaton.transition(current_state, symbol) or current_state
-        return call, next_typestate
+        # Update opened_files if this is an open-file call
+        opened_files = self.opened_files.copy()
+        if self.api_name == "open-file":
+            file_name = self.params.get("--file-name")
+            if file_name:
+                opened_files.add(file_name)
+        return call, next_typestate, opened_files
 
     def _reset_for_next_call(self):
         return CLIParsingState(
@@ -177,7 +182,8 @@ class CLIParsingState(IncrementalParsingState):
             accept=False,
             typestate=self.typestate,
             automaton=self.automaton,
-            parsed_calls=self.parsed_calls.copy()
+            parsed_calls=self.parsed_calls.copy(),
+            opened_files=self.opened_files.copy()
         )
 
     def num_active_states(self):
@@ -191,12 +197,14 @@ class CLIParsingState(IncrementalParsingState):
         finalized = state._finalize_call()
         calls = self.parsed_calls.copy()
         typestate = self.typestate
+        opened_files = self.opened_files.copy()
         if finalized is not None:
-            call, typestate = finalized
+            call, typestate, opened_files = finalized
             calls.append(call)
         return {
             "calls": calls,
-            "final_typestate": typestate
+            "final_typestate": typestate,
+            "opened_files": opened_files
         }
 
 # # Example automaton for file operations
