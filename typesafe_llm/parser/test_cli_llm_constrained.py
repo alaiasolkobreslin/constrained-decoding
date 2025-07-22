@@ -88,15 +88,10 @@ class CLIConstrainedGenerator:
         return trie_logits_processor(logits)
 
     def mask_separator(self, logits):
-        """Mask to only allow whitespace as separator after API/param name (can extend to ';' or '--')."""
+        """Mask to only allow whitespace as separator after API/param name (need to extend to ';' later)."""
         allowed = torch.zeros(logits.shape[-1], dtype=torch.bool)
-        for token_id in range(logits.shape[-1]):
-            token = self.tokenizer.decode([token_id])
-            # if token == " " or token == ";" or token == "--":
-            # TODO: fix this later to allow ;
-            if token == " ":
-                allowed[token_id] = True
-        logger.info(f"allowed: {[self.tokenizer.decode([token]) for token in range(logits.shape[-1]) if allowed[token]]}")
+        for separator in [" "]:
+            allowed[self.tokenizer.encode(separator, add_special_tokens=False)] = True
         mask = torch.full_like(logits, float('-inf'))
         mask[0, allowed] = 0
         return logits + mask
@@ -105,10 +100,8 @@ class CLIConstrainedGenerator:
         """Mask tokens based on CLI structure (e.g., only allow '--' or ';' in param_or_outfile)."""
         allowed = torch.zeros(logits.shape[-1], dtype=torch.bool)
         if state.state == "param_or_outfile":
-            for token_id in range(logits.shape[-1]):
-                token = self.tokenizer.decode([token_id])
-                if token == "--" or token == ";":
-                    allowed[token_id] = True
+            for separator in ["--", ";"]:
+                allowed[self.tokenizer.encode(separator, add_special_tokens=False)] = True
         else:
             allowed[:] = True
         mask = torch.full_like(logits, float('-inf'))
