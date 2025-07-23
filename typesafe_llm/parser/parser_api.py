@@ -48,7 +48,7 @@ class CLIParsingState(IncrementalParsingState):
         self.automaton = automaton
         self.parsed_calls = parsed_calls or []
         # Track opened files globally
-        self.opened_files = set() if not hasattr(self, 'opened_files') else self.opened_files
+        self.opened_files = opened_files or set()
 
     def parse_char(self, char: str) -> List["CLIParsingState"]:
         # Handle semicolon as API call separator

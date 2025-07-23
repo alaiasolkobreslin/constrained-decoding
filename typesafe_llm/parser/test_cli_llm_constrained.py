@@ -76,6 +76,13 @@ class CLIConstrainedGenerator:
     Generates CLI command sequences using typestate and parameter constraints.
     Handles token masking for API names, parameter names, separators, and CLI structure.
     """
+    # Mapping from parameter names to state attribute names for value sets
+    param_value_sources = {
+        "--file-name": "opened_files",
+        # Add more mappings here as needed, e.g.:
+        # "--user-id": "active_users",
+    }
+
     def __init__(self, automaton, parameter_names_dict, tokenizer, model, max_steps=15):
         self.automaton = automaton
         self.parameter_names_dict = parameter_names_dict
@@ -143,6 +150,7 @@ class CLIConstrainedGenerator:
     def handle_param_name(self, current_api_name, param_name_prefix, logits):
         """Handle parameter name decoding with Trie masking for allowed params of current API."""
         allowed_param_names = self.parameter_names_dict.get(current_api_name, []) if current_api_name is not None else []
+        logger.info(f"[handle_param_name] current_api_name: {current_api_name}, allowed_param_names: {allowed_param_names}")
         param_name_trie = Trie()
         param_name_token_ids = [self.tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
         for name, ids in zip(allowed_param_names, param_name_token_ids):
@@ -151,61 +159,46 @@ class CLIConstrainedGenerator:
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         param_name_prefix.append(next_token_id.item())
         expecting_separator = False
-        for param_ids in param_name_token_ids:
+        completed_param_name = None
+        for param_ids, param_name in zip(param_name_token_ids, allowed_param_names):
             if param_name_prefix == param_ids:
                 logger.info(f"Completed parameter name: {self.tokenizer.decode(param_name_prefix)}")
+                completed_param_name = param_name
                 param_name_prefix.clear()
                 expecting_separator = True
                 break
         else:
             logger.info(f"Didn't complete parameter name! Prefix is: {self.tokenizer.decode(param_name_prefix)}")
         next_token_str = self.tokenizer.decode(next_token_id)
-        return next_token_id, next_token_str, expecting_separator
+        return next_token_id, next_token_str, expecting_separator, completed_param_name
 
-    def handle_param_value(self, current_api_name, param_name, param_value_prefix, logits, opened_files):
-        """Handle parameter value decoding, constraining file names for read/write/close to opened files."""
-        # Only constrain if this is the file-name parameter
-        if param_name == "--file-name":
-            if current_api_name == "open-file":
-                # Allow any file name (no constraint)
-                allowed_file_names = None
-            elif current_api_name in ("read-file", "write-file", "close-file"):
-                # Only allow opened files
-                allowed_file_names = list(opened_files)
-            else:
-                allowed_file_names = None
-            if allowed_file_names is not None:
-                # Build a Trie of allowed file names
-                file_name_trie = Trie()
-                file_name_token_ids = [self.tokenizer.encode(f, add_special_tokens=False) for f in allowed_file_names]
-                for name, ids in zip(allowed_file_names, file_name_token_ids):
-                    file_name_trie.insert(ids, name)
-                filtered_logits = self.mask_with_trie(file_name_trie, param_value_prefix, logits)
-            else:
-                filtered_logits = logits
+    def handle_param_value(self, current_api_name, param_name, param_value_prefix, logits, value_set=None):
+        """Handle parameter value decoding, constraining values for specific parameters based on value_set."""
+        # Only constrain if a value_set is provided
+        if value_set is not None:
+            allowed_values = list(value_set)
+            # Build a Trie of allowed values
+            value_trie = Trie()
+            value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in allowed_values]
+            for name, ids in zip(allowed_values, value_token_ids):
+                value_trie.insert(ids, name)
+            filtered_logits = self.mask_with_trie(value_trie, param_value_prefix, logits)
         else:
             filtered_logits = logits
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         param_value_prefix.append(next_token_id.item())
         expecting_separator = False
-        # For file names, check if we've completed a file name
-        if param_name == "--file-name":
-            if allowed_file_names is not None:
-                file_name_token_ids = [self.tokenizer.encode(f, add_special_tokens=False) for f in allowed_file_names]
-                for file_ids in file_name_token_ids:
-                    if param_value_prefix == file_ids:
-                        logger.info(f"Completed file name: {self.tokenizer.decode(param_value_prefix)}")
-                        param_value_prefix.clear()
-                        expecting_separator = True
-                        break
-            else:
-                # For open-file, just check for whitespace or separator
-                token_str = self.tokenizer.decode(next_token_id)
-                if token_str.isspace() or token_str == ";":
+        # For constrained values, check if we've completed a value
+        if value_set is not None:
+            value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in value_set]
+            for value_ids in value_token_ids:
+                if param_value_prefix == value_ids:
+                    logger.info(f"Completed value: {self.tokenizer.decode(param_value_prefix)}")
                     param_value_prefix.clear()
                     expecting_separator = True
+                    break
         else:
-            # For other params, allow any value
+            # For unconstrained values, check for whitespace or separator
             token_str = self.tokenizer.decode(next_token_id)
             if token_str.isspace() or token_str == ";":
                 param_value_prefix.clear()
@@ -233,9 +226,10 @@ class CLIConstrainedGenerator:
         current_api_name = None # This is the current API name
         current_param_name = None # This is the current parameter name
         for step in range(self.max_steps):
+            logger.info(f"\n[run] Step {step}: parser_state.state = {state.state}, current_api_name = {current_api_name}, current_param_name = {current_param_name}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])[-50:]}'")
+            logger.info(f"[run] Step {step}: opened_files = {state.opened_files}")
             outputs = self.model(input_ids)
             logits = outputs.logits[:, -1, :]
-            logger.info(f"\nStep {step}: parser_state.state = {state.state}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])[-50:]}'")
             if expecting_separator:
                 next_token_id, next_token_str, expecting_separator = self.handle_separator(logits)
             elif state.state == "api" or constraining_api_name:
@@ -245,36 +239,41 @@ class CLIConstrainedGenerator:
                     current_api_name = new_api_name
                 expecting_separator = new_expecting_separator
             elif state.state == "param_or_outfile":
-                # If we are in the middle of a param name, use handle_param_name
-                if param_name_prefix:
-                    next_token_id, next_token_str, expecting_separator = self.handle_param_name(current_api_name, param_name_prefix, logits)
-                    if expecting_separator:
-                        current_param_name = self.tokenizer.decode(param_name_prefix)
+                # Always try to generate a parameter name if we don't have one yet
+                if current_param_name is None:
+                    logger.info(f"[run] About to generate parameter name for API: {current_api_name}")
+                    next_token_id, next_token_str, expecting_separator, completed_param_name = self.handle_param_name(current_api_name, param_name_prefix, logits)
+                    if expecting_separator and completed_param_name is not None:
+                        current_param_name = completed_param_name
                 else:
-                    # If we just finished a param name, expect a value
-                    if current_param_name == "--file-name":
-                        next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, state.opened_files)
-                        if expecting_separator:
-                            current_param_name = None
-                    else:
-                        next_token_id, next_token_str, expecting_separator = self.handle_param_name(current_api_name, param_name_prefix, logits)
-                        if expecting_separator:
-                            current_param_name = self.tokenizer.decode(param_name_prefix)
+                    # If we have a parameter name, expect a value
+                    value_set = None
+                    if current_param_name in self.param_value_sources:
+                        value_set_name = self.param_value_sources[current_param_name]
+                        value_set = getattr(state, value_set_name, None)
+                    next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, value_set)
+                    if expecting_separator:
+                        current_param_name = None
             elif state.state == "param_value":
-                # If expecting a value for --file-name, constrain it
-                if current_param_name == "--file-name":
-                    next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, state.opened_files)
-                    if expecting_separator:
-                        current_param_name = None
-                else:
-                    next_token_id, next_token_str, expecting_separator = self.handle_param_name(current_api_name, param_name_prefix, logits)
-                    if expecting_separator:
-                        current_param_name = None
+                # If expecting a value for a parameter with a value set, constrain it
+                value_set = None
+                if current_param_name in self.param_value_sources:
+                    value_set_name = self.param_value_sources[current_param_name]
+                    value_set = getattr(state, value_set_name, None)
+                next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, value_set)
+                if expecting_separator:
+                    current_param_name = None
             else:
                 next_token_id, next_token_str = self.handle_cli_structure(state, logits)
-            logger.info(f"Step {step}: '{next_token_str}'")
+            logger.info(f"[run] Step {step}: generated token '{next_token_str}'")
             input_ids = torch.cat([input_ids, next_token_id.unsqueeze(0)], dim=1)
             state = state.parse_char(next_token_str)[0]
+            # If a semicolon was just processed, state will be reset for the next call, with opened_files updated
+            # (parse_char handles this in CLIParsingState)
+            # If the token was a semicolon, update state immediately so opened_files is available for next step
+            if next_token_str == ";":
+                logger.info("[run] Semicolon processed, state and opened_files updated for next call.")
+                # state is already updated above, so nothing more to do, but this highlights the logic
             if state.typestate == self.automaton.final_states[0]:
                 logger.info("Reached final typestate!")
                 break
@@ -285,41 +284,3 @@ if __name__ == "__main__":
     prompt = "fake-service open-file --file-name my-file.txt; fake-service "
     generator = CLIConstrainedGenerator(automaton, parameter_names, tokenizer, model, max_steps=15)
     generator.run(prompt)
-
-
-# class CLIStructureLogitsProcessor(LogitsProcessor):
-#     """ Constrains the LLM to generate valid next CLI tokens given a parser state. """
-#     def __init__(self, parser_state, tokenizer):
-#         self.parser_state = parser_state
-#         self.tokenizer = tokenizer
-
-#     def __call__(self, input_ids, scores):
-#         allowed = torch.zeros(scores.shape[-1], dtype=torch.bool)
-#         # Determine what is valid next, based on parser_state.state
-#         logger.info(f"entering CLIStructureLogitsProcessor __call__ with parser_state.state == {self.parser_state.state}")
-#         if self.parser_state.state == "param_or_outfile":
-#             # Only allow '--' or ';' (or optionally a filename token)
-#             for token_id in range(scores.shape[-1]):
-#                 token = self.tokenizer.decode([token_id])
-#                 if token == "--" or token == ";":
-#                     allowed[token_id] = True
-#         elif self.parser_state.state == "param_value":
-#             # Allow any token (or restrict to alphanumeric)
-#             allowed[:] = True
-#         elif self.parser_state.state == "service":
-#             logger.info("got to __call__ for CLIStructureLogitsProcessor, state == service")
-#             # Only allow 'fake-service' (or whatever service names you want)
-#             for token_id in range(scores.shape[-1]):
-#                 token = self.tokenizer.decode([token_id])
-#                 if token.strip() == "fake-service":
-#                     allowed[token_id] = True
-#         elif self.parser_state.state == "api":
-#             # TODO: fix this to allow only valid API names
-#             allowed[:] = True
-#         else:
-#             allowed[:] = True
-#         allowed_tokens = [self.tokenizer.decode([i]) for i in range(scores.shape[-1]) if allowed[i]]
-#         logger.info(f"[CLI Structure] Allowed tokens: {allowed_tokens[:10]}")
-#         mask = torch.full_like(scores, float('-inf'))
-#         mask[0, allowed] = 0
-#         return scores + mask
