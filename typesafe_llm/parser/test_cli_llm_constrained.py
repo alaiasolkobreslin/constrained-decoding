@@ -2,7 +2,7 @@ import torch
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.generation.logits_process import LogitsProcessor
-from parser_api import CLIParsingState, Automaton
+from parser_api import CLIParsingState, EFSM, get_valid_transitions, get_allowed_values
 from trie import Trie
 import json
 import os
@@ -22,13 +22,14 @@ with open(automaton_json_path, "r") as f:
 with open(parameter_names_json_path, "r") as f:
     parameter_names = json.load(f)["fake-service"]
 
-# Setup automaton and parser
-automaton = Automaton(
+# Setup EFSM and parser
+efsm = EFSM(
     states=automaton_data["states"],
     symbols=automaton_data["symbols"],
-    transitions=automaton_data["transitions"],
     initial_state=automaton_data["initial_state"],
-    final_states=automaton_data["final_states"]
+    final_states=automaton_data["final_states"],
+    internal_vars=automaton_data.get("internal_vars", {}),
+    transitions=automaton_data["transitions"]
 )
 
 # Load model and tokenizer
@@ -83,8 +84,8 @@ class CLIConstrainedGenerator:
         # "--user-id": "active_users",
     }
 
-    def __init__(self, automaton, parameter_names_dict, tokenizer, model, max_steps=15):
-        self.automaton = automaton
+    def __init__(self, efsm, parameter_names_dict, tokenizer, model, max_steps=15):
+        self.efsm = efsm
         self.parameter_names_dict = parameter_names_dict
         self.tokenizer = tokenizer
         self.model = model
@@ -126,8 +127,14 @@ class CLIConstrainedGenerator:
             raise ValueError(f"Expected whitespace or semicolon, got {next_token_str}")
 
     def handle_api_name(self, state, api_name_prefix, logits):
-        """Handle API name decoding with Trie masking."""
-        valid_api_names = list(self.automaton.transitions[state.typestate].keys()) if state.typestate is not None and state.typestate in self.automaton.transitions else []
+        """Handle API name decoding with Trie masking using EFSM valid transitions."""
+        # Get valid transitions from current state
+        valid_transitions = get_valid_transitions(self.efsm, state.typestate, state.internal_vars)
+        valid_api_names = [t['symbol'] for t in valid_transitions]
+        
+        logger.info(f"[handle_api_name] Current state: {state.typestate}, internal_vars: {state.internal_vars}")
+        logger.info(f"[handle_api_name] Valid API names: {valid_api_names}")
+        
         valid_api_name_token_ids = [self.tokenizer.encode(api, add_special_tokens=False) for api in valid_api_names]
         valid_api_name_trie = Trie()
         for api, ids in zip(valid_api_names, valid_api_name_token_ids):
@@ -172,11 +179,15 @@ class CLIConstrainedGenerator:
         next_token_str = self.tokenizer.decode(next_token_id)
         return next_token_id, next_token_str, expecting_separator, completed_param_name
 
-    def handle_param_value(self, current_api_name, param_name, param_value_prefix, logits, value_set=None):
-        """Handle parameter value decoding, constraining values for specific parameters based on value_set."""
-        # Only constrain if a value_set is provided
-        if value_set is not None:
-            allowed_values = list(value_set)
+    def handle_param_value(self, current_api_name, param_name, param_value_prefix, logits, state):
+        """Handle parameter value decoding, constraining values for specific parameters based on EFSM predicates."""
+        # Get allowed values from EFSM predicates
+        allowed_values = get_allowed_values(self.efsm, state.typestate, current_api_name, state.internal_vars)
+        
+        logger.info(f"[handle_param_value] param_name: {param_name}, allowed_values: {allowed_values}")
+        
+        # Only constrain if allowed values are found from EFSM predicates
+        if allowed_values:
             # Build a Trie of allowed values
             value_trie = Trie()
             value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in allowed_values]
@@ -184,13 +195,29 @@ class CLIConstrainedGenerator:
                 value_trie.insert(ids, name)
             filtered_logits = self.mask_with_trie(value_trie, param_value_prefix, logits)
         else:
-            filtered_logits = logits
+            # Fallback to the old method for backward compatibility
+            value_set = None
+            if param_name in self.param_value_sources:
+                value_set_name = self.param_value_sources[param_name]
+                value_set = getattr(state, value_set_name, None)
+            if value_set is not None:
+                allowed_values = list(value_set)
+                # Build a Trie of allowed values
+                value_trie = Trie()
+                value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in allowed_values]
+                for name, ids in zip(allowed_values, value_token_ids):
+                    value_trie.insert(ids, name)
+                filtered_logits = self.mask_with_trie(value_trie, param_value_prefix, logits)
+            else:
+                filtered_logits = logits
+        
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         param_value_prefix.append(next_token_id.item())
         expecting_separator = False
+        
         # For constrained values, check if we've completed a value
-        if value_set is not None:
-            value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in value_set]
+        if allowed_values:
+            value_token_ids = [self.tokenizer.encode(v, add_special_tokens=False) for v in allowed_values]
             for value_ids in value_token_ids:
                 if param_value_prefix == value_ids:
                     logger.info(f"Completed value: {self.tokenizer.decode(param_value_prefix)}")
@@ -215,7 +242,7 @@ class CLIConstrainedGenerator:
 
     def run(self, prompt):
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
-        state = CLIParsingState(typestate=self.automaton.initial_state, automaton=self.automaton)
+        state = CLIParsingState(typestate=self.efsm.initial_state, efsm=self.efsm, internal_vars=self.efsm.internal_vars.copy())
         for char in prompt:
             state = state.parse_char(char)[0]
         api_name_prefix = [] # This is the prefix of the API name that we are currently constraining
@@ -227,7 +254,7 @@ class CLIConstrainedGenerator:
         current_param_name = None # This is the current parameter name
         for step in range(self.max_steps):
             logger.info(f"\n[run] Step {step}: parser_state.state = {state.state}, current_api_name = {current_api_name}, current_param_name = {current_param_name}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])[-50:]}'")
-            logger.info(f"[run] Step {step}: opened_files = {state.opened_files}")
+            logger.info(f"[run] Step {step}: opened_files = {state.opened_files}, internal_vars = {state.internal_vars}")
             outputs = self.model(input_ids)
             logits = outputs.logits[:, -1, :]
             if expecting_separator:
@@ -247,20 +274,12 @@ class CLIConstrainedGenerator:
                         current_param_name = completed_param_name
                 else:
                     # If we have a parameter name, expect a value
-                    value_set = None
-                    if current_param_name in self.param_value_sources:
-                        value_set_name = self.param_value_sources[current_param_name]
-                        value_set = getattr(state, value_set_name, None)
-                    next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, value_set)
+                    next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, state)
                     if expecting_separator:
                         current_param_name = None
             elif state.state == "param_value":
                 # If expecting a value for a parameter with a value set, constrain it
-                value_set = None
-                if current_param_name in self.param_value_sources:
-                    value_set_name = self.param_value_sources[current_param_name]
-                    value_set = getattr(state, value_set_name, None)
-                next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, value_set)
+                next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, state)
                 if expecting_separator:
                     current_param_name = None
             else:
@@ -274,7 +293,7 @@ class CLIConstrainedGenerator:
             if next_token_str == ";":
                 logger.info("[run] Semicolon processed, state and opened_files updated for next call.")
                 # state is already updated above, so nothing more to do, but this highlights the logic
-            if state.typestate == self.automaton.final_states[0]:
+            if state.typestate in self.efsm.final_states:
                 logger.info("Reached final typestate!")
                 break
         logger.info("\nFinal output: " + self.tokenizer.decode(input_ids[0]))
@@ -282,5 +301,5 @@ class CLIConstrainedGenerator:
 
 if __name__ == "__main__":
     prompt = "fake-service open-file --file-name my-file.txt; fake-service "
-    generator = CLIConstrainedGenerator(automaton, parameter_names, tokenizer, model, max_steps=15)
+    generator = CLIConstrainedGenerator(efsm, parameter_names, tokenizer, model, max_steps=30)
     generator.run(prompt)
