@@ -154,28 +154,61 @@ class CLIConstrainedGenerator:
         next_token_str = self.tokenizer.decode(next_token_id)
         return next_token_id, next_token_str, current_api_name, expecting_separator
 
-    def handle_param_name(self, current_api_name, param_name_prefix, logits):
+    def handle_param_name(self, current_api_name, param_name_prefix, logits, state):
         """Handle parameter name decoding with Trie masking for allowed params of current API."""
-        allowed_param_names = self.parameter_names_dict.get(current_api_name, []) if current_api_name is not None else []
-        logger.info(f"[handle_param_name] current_api_name: {current_api_name}, allowed_param_names: {allowed_param_names}")
-        param_name_trie = Trie()
-        param_name_token_ids = [self.tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
-        for name, ids in zip(allowed_param_names, param_name_token_ids):
-            param_name_trie.insert(ids, name)
-        filtered_logits = self.mask_with_trie(param_name_trie, param_name_prefix, logits)
+        # Get all parameters for this API
+        all_params = self.parameter_names_dict.get(current_api_name, []) if current_api_name is not None else []
+        # Get already used parameters
+        used_params = set(state.params.keys())
+        # Get remaining unused parameters
+        unused_params = [p for p in all_params if p not in used_params]
+        
+        logger.info(f"[handle_param_name] current_api_name: {current_api_name}, all_params: {all_params}")
+        logger.info(f"[handle_param_name] used_params: {used_params}, unused_params: {unused_params}")
+        
+        if unused_params:
+            # Allow unused parameter names
+            allowed_param_names = unused_params
+            param_name_trie = Trie()
+            param_name_token_ids = [self.tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
+            for name, ids in zip(allowed_param_names, param_name_token_ids):
+                param_name_trie.insert(ids, name)
+            filtered_logits = self.mask_with_trie(param_name_trie, param_name_prefix, logits)
+        else:
+            # All parameters used, only allow semicolon separator
+            logger.info("All parameters used, only allowing semicolon separator")
+            # Get the token ID for semicolon
+            semicolon_token_id = self.tokenizer.encode(";", add_special_tokens=False)[0]
+            # Create a mask that only allows the semicolon token
+            filtered_logits = torch.full_like(logits, float('-inf'))
+            filtered_logits[0, semicolon_token_id] = logits[0, semicolon_token_id]
+            
         next_token_id = torch.argmax(filtered_logits, dim=-1)
         param_name_prefix.append(next_token_id.item())
         expecting_separator = False
         completed_param_name = None
-        for param_ids, param_name in zip(param_name_token_ids, allowed_param_names):
-            if param_name_prefix == param_ids:
-                logger.info(f"Completed parameter name: {self.tokenizer.decode(param_name_prefix)}")
-                completed_param_name = param_name
+        
+        if unused_params:
+            # Check if we completed a parameter name
+            param_name_token_ids = [self.tokenizer.encode(p, add_special_tokens=False) for p in allowed_param_names]
+            for param_ids, param_name in zip(param_name_token_ids, allowed_param_names):
+                if param_name_prefix == param_ids:
+                    logger.info(f"Completed parameter name: {self.tokenizer.decode(param_name_prefix)}")
+                    completed_param_name = param_name
+                    param_name_prefix.clear()
+                    expecting_separator = True
+                    break
+            else:
+                logger.info(f"Didn't complete parameter name! Prefix is: {self.tokenizer.decode(param_name_prefix)}")
+        else:
+            # Check if we generated the semicolon
+            if next_token_id.item() == self.tokenizer.encode(";", add_special_tokens=False)[0]:
+                logger.info("Generated semicolon separator")
                 param_name_prefix.clear()
                 expecting_separator = True
-                break
-        else:
-            logger.info(f"Didn't complete parameter name! Prefix is: {self.tokenizer.decode(param_name_prefix)}")
+            else:
+                logger.info(f"Unexpected token when expecting semicolon: {self.tokenizer.decode(next_token_id)}")
+                
         next_token_str = self.tokenizer.decode(next_token_id)
         return next_token_id, next_token_str, expecting_separator, completed_param_name
 
@@ -252,6 +285,7 @@ class CLIConstrainedGenerator:
         expecting_separator = False # This is a flag to indicate that we are expecting a separator
         current_api_name = None # This is the current API name
         current_param_name = None # This is the current parameter name
+        service_completed = False # This is a flag to indicate that we just completed the service name
         for step in range(self.max_steps):
             logger.info(f"\n[run] Step {step}: parser_state.state = {state.state}, current_api_name = {current_api_name}, current_param_name = {current_param_name}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])[-50:]}'")
             logger.info(f"[run] Step {step}: opened_files = {state.opened_files}, internal_vars = {state.internal_vars}")
@@ -259,17 +293,22 @@ class CLIConstrainedGenerator:
             logits = outputs.logits[:, -1, :]
             if expecting_separator:
                 next_token_id, next_token_str, expecting_separator = self.handle_separator(logits)
-            elif state.state == "api" or constraining_api_name:
+            elif state.state == "api" or constraining_api_name or service_completed:
                 # If the current state is "api" or we are currently constraining the API name, handle the API name
                 next_token_id, next_token_str, new_api_name, new_expecting_separator = self.handle_api_name(state, api_name_prefix, logits)
                 if new_api_name is not None:
                     current_api_name = new_api_name
+                    # After completing an API name, we should transition to parameter generation
+                    constraining_api_name = False  # Reset the flag
                 expecting_separator = new_expecting_separator
+                if service_completed:
+                    service_completed = False  # Reset the flag only after first API token
+                    constraining_api_name = True  # Set flag to continue API generation
             elif state.state == "param_or_outfile":
                 # Always try to generate a parameter name if we don't have one yet
                 if current_param_name is None:
                     logger.info(f"[run] About to generate parameter name for API: {current_api_name}")
-                    next_token_id, next_token_str, expecting_separator, completed_param_name = self.handle_param_name(current_api_name, param_name_prefix, logits)
+                    next_token_id, next_token_str, expecting_separator, completed_param_name = self.handle_param_name(current_api_name, param_name_prefix, logits, state)
                     if expecting_separator and completed_param_name is not None:
                         current_param_name = completed_param_name
                 else:
@@ -282,6 +321,30 @@ class CLIConstrainedGenerator:
                 next_token_id, next_token_str, expecting_separator = self.handle_param_value(current_api_name, current_param_name, param_value_prefix, logits, state)
                 if expecting_separator:
                     current_param_name = None
+            elif state.state == "service":
+                # When in service state, constrain to generate "fake-service"
+                logger.info("[run] Generating service name")
+                # Create a prefix to track the current service name being generated
+                if not hasattr(self, 'service_prefix'):
+                    self.service_prefix = []
+                
+                service_trie = Trie()
+                service_token_ids = self.tokenizer.encode("fake-service", add_special_tokens=False)
+                service_trie.insert(service_token_ids, "fake-service")
+                filtered_logits = self.mask_with_trie(service_trie, self.service_prefix, logits)
+                next_token_id = torch.argmax(filtered_logits, dim=-1)
+                next_token_str = self.tokenizer.decode(next_token_id)
+                
+                # Add to prefix and check if we completed the service name
+                self.service_prefix.append(next_token_id.item())
+                if self.service_prefix == service_token_ids:
+                    logger.info("Completed service name: fake-service")
+                    self.service_prefix.clear()  # Reset for next time
+                    service_completed = True # Set flag to indicate service name completion
+                    # After completing service name, we need a space before the API name
+                    # But the parser will handle this automatically when we call parse_char
+                else:
+                    logger.info(f"Service name prefix: {self.tokenizer.decode(self.service_prefix)}")
             else:
                 next_token_id, next_token_str = self.handle_cli_structure(state, logits)
             logger.info(f"[run] Step {step}: generated token '{next_token_str}'")
@@ -301,5 +364,5 @@ class CLIConstrainedGenerator:
 
 if __name__ == "__main__":
     prompt = "fake-service open-file --file-name my-file.txt; fake-service "
-    generator = CLIConstrainedGenerator(efsm, parameter_names, tokenizer, model, max_steps=30)
+    generator = CLIConstrainedGenerator(efsm, parameter_names, tokenizer, model, max_steps=25)
     generator.run(prompt)
