@@ -218,7 +218,7 @@ class CLIParsingState(IncrementalParsingState):
             api_name = token
             state = "param_or_outfile"
         elif state == "param_or_outfile":
-            if token.startswith("--"):
+            if token.startswith("--"): 
                 current_param = token
                 state = "param_value"
             else:

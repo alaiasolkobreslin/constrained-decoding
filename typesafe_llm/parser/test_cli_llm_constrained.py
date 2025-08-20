@@ -287,7 +287,7 @@ class CLIConstrainedGenerator:
         current_param_name = None # This is the current parameter name
         service_completed = False # This is a flag to indicate that we just completed the service name
         for step in range(self.max_steps):
-            logger.info(f"\n[run] Step {step}: parser_state.state = {state.state}, current_api_name = {current_api_name}, current_param_name = {current_param_name}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])[-50:]}'")
+            logger.info(f"\n[run] Step {step}: parser_state.state = {state.state}, current_api_name = {current_api_name}, current_param_name = {current_param_name}, decoded_so_far = '{self.tokenizer.decode(input_ids[0])}'")
             logger.info(f"[run] Step {step}: opened_files = {state.opened_files}, internal_vars = {state.internal_vars}")
             outputs = self.model(input_ids)
             logits = outputs.logits[:, -1, :]
@@ -341,6 +341,7 @@ class CLIConstrainedGenerator:
                     logger.info("Completed service name: fake-service")
                     self.service_prefix.clear()  # Reset for next time
                     service_completed = True # Set flag to indicate service name completion
+                    expecting_separator = True  # Force a space before API name
                     # After completing service name, we need a space before the API name
                     # But the parser will handle this automatically when we call parse_char
                 else:
@@ -364,5 +365,5 @@ class CLIConstrainedGenerator:
 
 if __name__ == "__main__":
     prompt = "fake-service open-file --file-name my-file.txt; fake-service "
-    generator = CLIConstrainedGenerator(efsm, parameter_names, tokenizer, model, max_steps=25)
+    generator = CLIConstrainedGenerator(efsm, parameter_names, tokenizer, model, max_steps=40)
     generator.run(prompt)
